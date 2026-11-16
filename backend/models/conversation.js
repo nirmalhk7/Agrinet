@@ -65,6 +65,9 @@ function rename(id, title, ownerId) { return update(id, 'title', title, ownerId)
 
 async function remove(id, ownerId) {
   if (typeof ownerId !== 'string' || !ownerId.trim()) return false;
+  if (!await getOwned(id, ownerId)) return false;
+  // Keep ownership discoverable when a paged message deletion needs retrying.
+  await Message.removeByConversation(id);
   try {
     await docClient.delete({
       TableName: CONVERSATION_TABLE_NAME, Key: { id },
@@ -75,9 +78,7 @@ async function remove(id, ownerId) {
     if (err.code === 'ConditionalCheckFailedException') return false;
     throw err;
   }
-  // Closing streams must not depend on later narrative cleanup succeeding.
   require('../lib/conversationStreams').close(id);
-  await Message.removeByConversation(id);
   return true;
 }
 

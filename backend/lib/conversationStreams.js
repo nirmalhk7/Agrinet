@@ -1,21 +1,14 @@
 const streams = new Map();
-const accounts = new Map();
-const MAX_STREAMS_PER_ACCOUNT = 5;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
-function reserve(user) {
+function validateExpiry(user) {
   const expiresAt = user.exp * 1000;
   if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
     return { status: 401, error: 'Expiring account token required' };
   }
-  const count = accounts.get(user.userId) || 0;
-  if (count >= MAX_STREAMS_PER_ACCOUNT) {
-    return { status: 429, error: 'Too many open streams' };
-  }
-  accounts.set(user.userId, count + 1);
 }
 
-function register(id, ownerId, expiresAt, res) {
+function register(id, expiresAt, res) {
   if (!streams.has(id)) streams.set(id, new Set());
   const clients = streams.get(id);
   let timer;
@@ -23,9 +16,6 @@ function register(id, ownerId, expiresAt, res) {
   const cleanup = () => {
     if (!client.cleaned) {
       client.cleaned = true;
-      const remaining = accounts.get(ownerId) - 1;
-      if (remaining) accounts.set(ownerId, remaining);
-      else accounts.delete(ownerId);
       clearTimeout(timer);
       clients.delete(client);
       if (!clients.size && streams.get(id) === clients) streams.delete(id);
@@ -49,12 +39,12 @@ function register(id, ownerId, expiresAt, res) {
 }
 
 async function open(req, res) {
-  const denial = reserve(req.user);
+  const denial = validateExpiry(req.user);
   if (denial) return res.status(denial.status).json({ error: denial.error });
   const expiresAt = req.user.exp * 1000;
   const ownerId = req.user.userId;
   const id = req.params.conversationId;
-  const client = register(id, ownerId, expiresAt, res);
+  const client = register(id, expiresAt, res);
   const cleanup = client.cleanup;
   // Register the pending connection BEFORE reading ownership, so a concurrent
   // committed delete can revoke it even if the database response is in flight.
@@ -110,6 +100,7 @@ function close(id) {
     client.revoked = true;
     client.cleanup();
     if (client.ready) client.res.end();
+    else client.res.status(404).json({ error: 'Not found' });
   }
   streams.delete(id);
 }

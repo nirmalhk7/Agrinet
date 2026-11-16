@@ -2,7 +2,16 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const Conversation = require('../models/conversation');
-const streams = require('../lib/conversationStreams');
+const registry = require('../lib/conversationStreams');
+const { createConcurrentStreamLimit } = require('../middleware/streamConcurrency');
+const reserve = createConcurrentStreamLimit({ maximum: 5 });
+const streams = {
+  ...registry,
+  async open(req, res) {
+    try { return await reserve(req, res, () => registry.open(req, res)); }
+    catch (error) { res.end(); throw error; }
+  },
+};
 
 function response() {
   return Object.assign(new EventEmitter(), {

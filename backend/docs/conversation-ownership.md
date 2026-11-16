@@ -33,11 +33,12 @@ claim/transfer endpoint and performs no automatic data migration or deletion.
 If ownership cannot be established, preserve the inaccessible row for the
 operator's data-retention process. Ownership transfer is not supported here.
 
-The existing Messages deletion helper still has its previously documented
-large-history batching/retry limitations. This change establishes who may
-invoke deletion; it does not claim complete erasure of large histories or
-physical attachment bytes. Stale attachment files become inaccessible when
-their owned message/conversation reference no longer exists.
+Conversation deletion follows every Messages query page and deletes in batches
+of at most 25 writes. Messages are removed before the conversation row, so a
+storage error or unprocessed batch leaves ownership available for a retry.
+This does not erase physical attachment bytes or durable retry receipts. Stale
+attachment files become inaccessible when their owned message/conversation
+reference no longer exists.
 
 The deployment needs DynamoDB GetItem/Scan/PutItem/UpdateItem/DeleteItem access
 to the configured conversation table and the existing message access, now
@@ -48,11 +49,14 @@ that conversation partition, including continuation pages. No new index or
 table is required. New files use UUID names, safe extensions and exclusive
 writes; original names remain in message metadata.
 
-**Roll out #191 together with the authenticated-stream companion PR #192.**
-#191 closes REST and attachment access; #192 supplies account-authorized SSE.
-See `authenticated-streams.md` for that boundary and lifecycle. Other open hardening work, including admin,
-user/federation authorization, remains
-separate and must be assessed before exposing public signup.
+This branch includes merged conversation ownership (#191) and account/federation
+security hardening (#197). The global `/events` feed remains retired with 410.
+`/stream/:conversationId` now requires an account token, account-keyed throttling,
+a shared concurrent-stream reservation and conversation ownership before sending
+stream headers. Attachment access retains its independent authentication, rate
+limits and ownership checks. Deploy the complete reviewed protections together;
+see `authenticated-streams.md` for Redis configuration and remaining replica
+delivery/revocation limits.
 
 Operators can count ownerless conversations without changing records:
 
@@ -73,8 +77,24 @@ after account verification and before database work; a renewed token for the
 same user does not reset the budget. IP subnet keys are the fallback when no
 account identity is available. Rejected requests return 429 and Retry-After.
 These budgets are configured at route registration through `chatRateLimit`.
-The in-memory counters are local to one server process; multi-process deployments
-need a shared express-rate-limit store to enforce a deployment-wide budget.
+With `REDIS_URL` configured, these counters share the existing Redis store across
+server instances. Conversation, message and legacy-upload budgets use separate
+namespaces. Set `RATE_LIMIT_REDIS_REQUIRED=true` for multi-instance deployment;
+startup refuses a missing Redis URL, and store errors fail closed. Without Redis,
+counters are local to one process. The existing general API budget also applies.
+Each route names authentication and its account limiter explicitly before the
+owner/database work. Authentication attempts retain the IP-based pre-auth limit.
+
+Verify shared counters against disposable loopback Redis from `backend`:
+
+```sh
+CHAT_LIMIT_REDIS_URL=redis://127.0.0.1:6379 node --test __tests__/chatSharedRateLimit.test.js
+```
+
+The check starts two local server processes, alternates 120 requests using fresh
+tokens for one account, and requires request 121 to return 429. Another account
+keeps its budget. The normal unit suite skips this explicit integration check
+when `CHAT_LIMIT_REDIS_URL` is absent.
 
 ## Browser integration
 
@@ -90,9 +110,34 @@ show “Sign in to use chat”; a 401 clears the expired token. Trusted-origin
 preflights permit Authorization, x-api-key and Idempotency-Key.
 
 Do not substitute an Amplify/Cognito token without an approved backend identity
-binding. PR #183 separately makes backend login/registration publicly
-reachable; until it lands, login still needs the server's existing integration
-authentication. This PR does not claim completed browser onboarding.
+binding. The merged security baseline exposes `/api/auth/login` publicly behind
+its own authentication-attempt throttle. The host account flow supplies the
+returned backend JWT; this PR adds no separate login UI or token storage.
+
+The same-origin host can import the adapter and call it after its existing login:
+
+```js
+import { setAccountToken } from './src/api.js';
+
+// `loginResponse` is the successful /api/auth/login response.
+setAccountToken(loginResponse.token);
+// On host logout:
+setAccountToken(null);
+```
+
+After installing both `backend` and `frontend/chat-ui` dependencies, run this
+explicit integration check from `frontend/chat-ui`:
+
+```sh
+node --test hostAccount.integration.js
+```
+
+It obtains a JWT through the real backend login route with synthetic local
+account storage, passes it through the exported setter, and reads an owned chat
+through the real account-authenticated route. A rejected token clears the
+adapter back to the UI's sign-in state. This verifies the integration contract;
+operators must still wire their deployed host's login/logout events and set
+`CORS_ALLOWED_ORIGINS` to its exact origin. The check runs no live account writes.
 
 Attachment buttons download through the authenticated adapter rather than
 opening uncredentialed URLs. Malformed, external and non-upload download paths

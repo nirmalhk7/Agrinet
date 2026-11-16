@@ -1,18 +1,20 @@
-const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
+const { rateLimit } = require('express-rate-limit');
+const { requestLimitOptions } = require('./rateLimit');
 
-function accountKey(req) {
-  return req.user?.userId ? `account:${req.user.userId}` : `ip:${ipKeyGenerator(req.ip)}`;
+// Use the same Redis-backed store and verified-identity keys as the API limits.
+function options(limit = 60, scope = 'chat') {
+  return {
+    ...requestLimitOptions({
+      prefix: `agrinet:chat:${scope}`,
+      windowMs: 60 * 1000,
+      limit,
+      message: 'Too many chat requests, please try again later'
+    }),
+    standardHeaders: 'draft-6'
+  };
 }
 
-function chatRateLimit(limit) {
-  return rateLimit({
-    windowMs: 60 * 1000,
-    limit,
-    keyGenerator: accountKey,
-    standardHeaders: 'draft-6',
-    legacyHeaders: false,
-    message: { error: 'Too many requests, please try again later' },
-  });
-}
-
-module.exports = chatRateLimit;
+module.exports = function chatRateLimit(limit, scope) {
+  return rateLimit(options(limit, scope));
+};
+module.exports.options = options;

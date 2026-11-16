@@ -108,7 +108,7 @@ describe('production conversation SSE boundary', () => {
     expect((await open('/stream/mine', { Authorization: bearer('alice', -1) })).status).toBe(401);
   });
 
-  test('parent deletion closes streams even when message cleanup fails', async () => {
+  test('failed message cleanup preserves ownership for retry and committed deletion closes streams', async () => {
     const response = await open('/stream/mine', { Authorization: bearer('alice') });
     const reader = response.body.getReader();
     mockCleanupFailure = true;
@@ -116,10 +116,12 @@ describe('production conversation SSE boundary', () => {
     const deletion = await fetch(base + '/conversations/mine', { method: 'DELETE', headers: { Authorization: bearer('alice') } });
     expectedError.mockRestore();
     expect(deletion.status).toBe(500);
+    expect(mockConversations.has('mine')).toBe(true);
+    mockCleanupFailure = false;
+    const retry = await fetch(base + '/conversations/mine', { method: 'DELETE', headers: { Authorization: bearer('alice') } });
+    expect(retry.status).toBe(204);
     expect(mockConversations.has('mine')).toBe(false);
-    global.emitMessage('mine', { content: 'late answer' });
-    const next = await reader.read();
-    expect(next.done).toBe(true);
+    expect((await reader.read()).done).toBe(true);
   });
 
   test('deletion revokes a stream whose ownership lookup is still in flight', async () => {
@@ -139,6 +141,28 @@ describe('production conversation SSE boundary', () => {
   test('retired global feed returns 410 without account credentials', async () => {
     const response = await open('/events');
     expect(response.status).toBe(410);
+  });
+  test('production stream route shares reservations and reuses released capacity', async () => {
+    const { EventEmitter } = require('node:events');
+    const { createConcurrentStreamLimit } = require('../middleware/streamConcurrency');
+    const reserve = createConcurrentStreamLimit({ maximum: 5 });
+    const userId = 'shared-capacity-owner';
+    mockConversations.set('capacity-room', { id: 'capacity-room', ownerId: userId });
+    const held = Array.from({ length: 5 }, () => new EventEmitter());
+    try {
+      for (const res of held) {
+        await reserve({ user: { userId, exp: Math.ceil(Date.now() / 1000) + 60 } }, res, () => {});
+      }
+      const blocked = await open('/stream/capacity-room', { Authorization: bearer(userId) });
+      expect(blocked.status).toBe(429);
+      held[0].emit('close');
+      await new Promise(resolve => setImmediate(resolve));
+      const admitted = await open('/stream/capacity-room', { Authorization: bearer(userId) });
+      expect(admitted.status).toBe(200);
+      expect(admitted.headers.get('content-type')).toContain('text/event-stream');
+    } finally {
+      for (const res of held) res.emit('close');
+    }
   });
   test('stream opening requests have an account budget before ownership reads', async () => {
     const auth = { Authorization: bearer('stream-rate-fixture') };

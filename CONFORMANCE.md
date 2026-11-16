@@ -56,9 +56,20 @@ claims above. SSE uses the same verified owner identity before stream headers,
 implemented in `backend/lib/conversationStreams.js` and checked by
 `backend/__tests__/conversationStreams.test.js`. The unrestricted global feed
 is retired. Streams expire with the account token and close on local parent
-deletion; cross-replica invalidation remains a named residual. See
+deletion after retryable message cleanup. Shared request/capacity guards bind
+to the verified account; Redis is required across replicas. Bindings include
+`backend/middleware/streamConcurrency.js`, `backend/__tests__/streamCapacity.test.js`
+and the optional real-Redis `streamSharedCapacity.test.js`. Shared capacity does
+not provide cross-replica event delivery or deletion invalidation. See
 `backend/docs/conversation-ownership.md` for migration and client
 integration limits.
+
+The application message API supports optional retry receipts, scoped to the
+authenticated caller and conversation. These are private operational metadata,
+not sealed dialog or commons entries; they store hashes and message references,
+not narrative. This does not promote any in-review binding above. See
+[`backend/docs/retry-safe-messages.md`](backend/docs/retry-safe-messages.md) for
+the guard, deployment requirements, crash limits, and executable checks.
 
 ### Browser garden planner
 
